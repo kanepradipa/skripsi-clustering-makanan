@@ -1,8 +1,23 @@
+"""backend/clustering.py
+
+Core clustering implementations used by the backend API.
+
+Contains:
+- normalize_data: simple min-max scaler
+- KMeans: lightweight K-means implementation returning labels, centroids and inertia
+- DBSCAN: density-based clustering using scipy.spatial.cKDTree for neighbor queries
+- evaluation utilities: silhouette, Davies-Bouldin, Calinski-Harabasz
+
+Notes:
+- Implementations are intentionally simple and readable for educational use.
+- For production or better stability use scikit-learn's implementations.
+"""
+
 # IMPORT LIBRARIES
 # ============================================================================
 import numpy as np  # NumPy untuk operasi array dan perhitungan matematika
 from typing import List, Dict, Any  # Type hints untuk dokumentasi tipe data parameter dan return value
-from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score  # Metrik evaluasi clustering dari scikit-learn
+from sklearn.metrics import silhouette_score, davies_bouldin_score  # Metrik evaluasi clustering dari scikit-learn
 from scipy.spatial import cKDTree  # KD-Tree dari scipy untuk pencarian neighbor yang efisien O(log n)
 import time  # Module time untuk mengukur durasi eksekusi proses
 

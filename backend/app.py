@@ -1,3 +1,18 @@
+"""backend/app.py
+
+Flask-based backend API for the Food Clustering project.
+
+This module exposes endpoints used by the Streamlit frontend:
+- /api/upload-csv : parse uploaded CSV files and return numeric data
+- /api/upload-excel : parse uploaded Excel files and return numeric data
+- /api/kmeans : run KMeans clustering (accepts normalized or raw data)
+- /api/dbscan : run DBSCAN clustering (expects normalized data)
+
+The file also contains helper code to safely call functions from
+`backend/clustering.py` and to avoid running the backend inside a
+Streamlit process.
+"""
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
@@ -10,9 +25,19 @@ import clustering
 
 
 def safe_get_unnormalized_cluster_averages(original_data: np.ndarray, labels: np.ndarray):
-    """Call clustering.get_unnormalized_cluster_averages if available, otherwise compute locally.
+    """
+    Ambil rata-rata atribut per cluster pada skala asli (tidak dinormalisasi).
 
-    This avoids import-time errors when the function isn't present in the clustering module.
+    Cara kerja:
+    - Jika modul `clustering` menyediakan fungsi `get_unnormalized_cluster_averages`,
+      panggil fungsi tersebut dan kembalikan hasilnya.
+    - Jika tidak tersedia atau terjadi error, hitung secara lokal:
+        * Buat set label unik, abaikan label -1 (noise)
+        * Untuk setiap label, ambil baris original_data yang sesuai dan hitung ukuran
+          cluster dan nilai rata-ratanya (mean) per atribut.
+
+    Return:
+        dict dengan format { 'cluster_1': {'size': int, 'mean': [..]}, ... }
     """
     try:
         fn = getattr(clustering, 'get_unnormalized_cluster_averages', None)
@@ -58,11 +83,38 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def read_root():
+    """
+    Endpoint root sederhana untuk cek kesehatan API.
+
+    Mengembalikan JSON singkat yang menandakan server backend hidup.
+    """
     return jsonify({"message": "Food Clustering API is running"})
 
 @app.route('/api/kmeans', methods=['POST'])
 def kmeans_cluster():
-    """Perform K-means clustering"""
+    """
+        Endpoint untuk menjalankan K-means clustering.
+
+        Input (JSON di request body):
+            - data: list of list (array 2D). Bisa data mentah atau sudah dinormalisasi.
+            - original_data (opsional): list of list, data pra-normalisasi untuk tujuan
+                menampilkan nilai 'Asli' pada frontend.
+            - k (opsional): jumlah cluster (default 3)
+            - max_iterations (opsional): batas iterasi K-means (default 100)
+
+        Alur:
+            1. Baca payload dan ubah ke numpy array
+            2. Jika original_data disediakan, anggap `data` sudah dinormalisasi.
+                 Jika tidak, normalisasikan `data` menggunakan fungsi `clustering.normalize_data`.
+            3. Validasi parameter `k`.
+            4. Jalankan KMeans.fit pada data ter-normalisasi.
+            5. Hitung metrik evaluasi dan statistik cluster, serta rata-rata pada skala asli.
+            6. Kembalikan hasil sebagai JSON.
+
+        Response:
+            JSON berisi keys: labels, centroids, inertia, iterations, processing_time,
+            serta tambahan metrics, statistics, unnormalized_averages.
+        """
     try:
         data = request.json.get('data')
         k = request.json.get('k', 3)
@@ -108,7 +160,19 @@ def kmeans_cluster():
 
 @app.route('/api/kmeans-elbow', methods=['POST'])
 def kmeans_elbow():
-    """Calculate elbow curve for K-means to help determine optimal k"""
+    """
+        Endpoint untuk menghitung kurva elbow (inertia vs k).
+
+        Input (JSON):
+            - data: list of list (array 2D)
+            - max_k (opsional): batas atas k yang diuji (default 10)
+
+        Alur:
+            - Normalisasi data bila perlu (jika original_data tidak diberikan)
+            - Batasi max_k ke nilai yang wajar (maks 20 atau jumlah baris)
+            - Jalankan KMeans untuk tiap k di range(1, max_k+1) dan kumpulkan inertia
+            - Kembalikan dictionary { 'k_values': [...], 'inertias': [...] }
+        """
     try:
         data = request.json.get('data')
         max_k = request.json.get('max_k', 10)
@@ -139,7 +203,22 @@ def kmeans_elbow():
 
 @app.route('/api/dbscan', methods=['POST'])
 def dbscan_cluster():
-    """Perform DBSCAN clustering"""
+    """
+        Endpoint untuk menjalankan DBSCAN clustering.
+
+        Input (JSON):
+            - data: list of list (array 2D). Disarankan sudah dinormalisasi.
+            - original_data (opsional): list of list untuk perhitungan nilai asli.
+            - eps (opsional): radius neighbor (default 0.5)
+            - min_samples (opsional): minimal poin untuk core point (default 5)
+
+        Alur:
+            - Baca payload, jika perlu normalisasi data dengan clustering.normalize_data
+            - Validasi eps dan min_samples
+            - Buat instance DBSCAN dan jalankan fit
+            - Hitung metrik, statistik, dan rata-rata pada skala asli
+            - Jika rasio yang ter-cluster kecil, tambahkan peringatan dalam response
+        """
     try:
         # Accept payload and support optional original_data (same as /api/kmeans)
         payload = request.json
@@ -195,7 +274,26 @@ def dbscan_cluster():
 
 @app.route('/api/upload-csv', methods=['POST'])
 def upload_csv():
-    """Upload and parse CSV file"""
+    """
+        Endpoint untuk menerima file CSV via multipart/form-data dan mengembalikan
+        data numerik yang siap diproses.
+
+        Strategi parsing (berlapis):
+            1. Coba pandas.read_csv auto-detect delimiter
+            2. Jika gagal, coba delimiter umum (',', ';', '\t', '|') dan engine 'python'/'c'
+            3. Jika masih gagal, coba beberapa encoding
+            4. Jika masih gagal, baca sebagai teks dan lakukan parsing manual
+
+        Pembersihan data:
+            - Drop kolom yang semuanya NaN
+            - Hapus kolom 'Unnamed'
+            - Pilih kolom numerik; jika tidak ada, coba konversi kolom string ke numerik
+            - Fill NaN dengan 0
+
+        Response:
+            JSON dengan keys: success, data (list of lists), rows, columns, column_names,
+            dan optional 'nama' (jika kolom 'Nama' tersedia).
+        """
     try:
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
@@ -344,7 +442,14 @@ def upload_csv():
 
 @app.route('/api/upload-excel', methods=['POST'])
 def upload_excel():
-    """Upload and parse Excel file"""
+    """
+        Endpoint untuk menerima file Excel (.xlsx, .xls) dan mengembalikan data numerik.
+
+        Alur:
+            - Coba baca dengan engine 'openpyxl', jika gagal coba 'xlrd'
+            - Lakukan pembersihan yang sama seperti upload_csv
+            - Kembalikan struktur JSON yang sama (success, data, rows, columns, column_names, nama)
+        """
     try:
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
